@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/nexus/inter-agent-message.schema.json",
+  "title": "InterAgentMessage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message_id",
+    "correlation_id",
+    "parent_span_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "payload_schema_ref",
+    "idempotency_key",
+    "timestamp",
+    "payload"
+  ],
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_span_id": {
+      "type": ["string", "null"]
+    },
+    "sender_agent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recipient_agent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload_schema_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "message_type": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "expires_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    }
+  }
+}

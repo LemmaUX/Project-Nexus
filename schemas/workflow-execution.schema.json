@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/nexus/workflow-execution.schema.json",
+  "title": "WorkflowExecution",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "execution_id",
+    "workflow_id",
+    "state",
+    "current_node_id",
+    "last_committed_node_id",
+    "version",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "type": "string",
+      "enum": ["PENDING", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "TIMED_OUT"]
+    },
+    "current_node_id": {
+      "type": ["string", "null"]
+    },
+    "last_committed_node_id": {
+      "type": ["string", "null"]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lease_owner": {
+      "type": ["string", "null"]
+    },
+    "lease_expires_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "heartbeat_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "resume_token": {
+      "type": ["string", "null"]
+    },
+    "human_input_required": {
+      "type": "boolean",
+      "default": false
+    },
+    "failure_reason": {
+      "type": ["string", "null"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
