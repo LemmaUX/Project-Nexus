@@ -10,7 +10,8 @@ The project is intentionally scoped to one concrete workflow: an automated resea
 - A Python validator that rejects invalid graphs before runtime.
 - A workflow execution state machine with valid transitions.
 - A Python workflow orchestrator that validates topology, creates executions, acquires Redis leases, and publishes task assignments to NATS JetStream.
-- ADRs covering the message broker choice and the orchestrator language selection.
+- A Python agent worker that consumes task assignments, applies idempotency checks, runs tools through a sandbox, and publishes task results.
+- ADRs covering the message broker choice, the orchestrator language selection, and the tool execution security model.
 - Docker Compose infrastructure for PostgreSQL, Redis, and NATS.
 - A Makefile with useful local commands.
 
