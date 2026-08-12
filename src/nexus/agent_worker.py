@@ -7,6 +7,8 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from .otel_setup import TelemetryConfig, configure_otel, inject_trace_headers, message_span
+
 
 @dataclass(frozen=True)
 class AgentWorkerConfig:
@@ -128,7 +130,12 @@ class IdempotencyRepository(Protocol):
 
 
 class MessagePublisher(Protocol):
-    def publish(self, subject: str, message: Mapping[str, Any]) -> None:
+    def publish(
+        self,
+        subject: str,
+        message: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         raise NotImplementedError
 
 
@@ -227,6 +234,7 @@ class AgentWorker:
         self.clock = clock
         self.config = config or AgentWorkerConfig()
         self.identifier_factory = identifier_factory or (lambda: uuid4().hex)
+        configure_otel(TelemetryConfig(service_name="nexus.agent.researcher"))
 
     async def run(self, jetstream: Any) -> None:
         consumer = await jetstream.pull_subscribe(
@@ -245,16 +253,21 @@ class AgentWorker:
 
     async def _handle_message(self, message: Any) -> None:
         raw_payload = message.data.decode("utf-8") if isinstance(message.data, (bytes, bytearray)) else message.data
+        headers = dict(getattr(message, "headers", None) or {})
         try:
             assignment = TaskAssignment.from_mapping(json.loads(raw_payload))
         except (json.JSONDecodeError, ValueError):
-            await message.ack()
+            await message.term()
             return
 
         try:
-            published = self.process_assignment(assignment)
+            published = self.process_assignment(assignment, trace_headers=headers)
+        except ToolExecutionDeniedError:
+            await message.term()
+            return
         except Exception:
-            await message.nak()
+            attempts = self._delivery_attempts(headers)
+            await message.nak(delay=self._retry_delay_seconds(attempts))
             return
 
         if published:
@@ -262,37 +275,66 @@ class AgentWorker:
         else:
             await message.ack()
 
-    def process_assignment(self, assignment: TaskAssignment) -> bool:
-        claimed = self.idempotency_repository.claim(
-            assignment.idempotency_key,
-            assignment.execution_id,
-            assignment.message_id,
-        )
-        if not claimed:
-            return False
-
-        tool_invocation = self.agent_model.plan_tool_invocation(assignment)
-        tool_result = self.tool_sandbox.execute(tool_invocation)
-        model_result = self.agent_model.compose_result(assignment, tool_result)
-
-        result_message = TaskResultMessage(
-            message_id=self.identifier_factory(),
-            correlation_id=assignment.correlation_id,
-            parent_span_id=assignment.message_id,
-            sender_agent_id=self.config.worker_agent_id,
-            recipient_agent_id=self.config.orchestrator_agent_id,
-            payload_schema_ref=self.config.task_result_payload_schema_ref,
-            idempotency_key=assignment.idempotency_key,
-            timestamp=self.clock.now(),
-            message_type="TASK_RESULT",
-            payload={
-                **dict(model_result),
-                "tool_name": tool_invocation.name,
-                "tool_arguments": dict(tool_invocation.arguments),
+    def process_assignment(self, assignment: TaskAssignment, trace_headers: Mapping[str, str] | None = None) -> bool:
+        with message_span(
+            service_name="nexus.agent.researcher",
+            span_name="agent.process_task",
+            incoming_headers=trace_headers,
+            attributes={
+                "messaging.system": "nats",
+                "messaging.destination": self.config.task_assignment_subject,
+                "messaging.operation": "process",
+                "workflow.execution_id": assignment.execution_id,
             },
-        )
-        self.publisher.publish(self.config.task_result_subject, result_message.to_dict())
-        return True
+        ):
+            with message_span(service_name="nexus.agent.researcher", span_name="agent.idempotency_check"):
+                claimed = self.idempotency_repository.claim(
+                    assignment.idempotency_key,
+                    assignment.execution_id,
+                    assignment.message_id,
+                )
+            if not claimed:
+                return False
+
+            with message_span(service_name="nexus.agent.researcher", span_name="agent.tool_selection"):
+                tool_invocation = self.agent_model.plan_tool_invocation(assignment)
+
+            with message_span(service_name="nexus.agent.researcher", span_name="agent.tool_execution"):
+                tool_result = self.tool_sandbox.execute(tool_invocation)
+
+            with message_span(service_name="nexus.agent.researcher", span_name="agent.compose_result"):
+                model_result = self.agent_model.compose_result(assignment, tool_result)
+
+            result_message = TaskResultMessage(
+                message_id=self.identifier_factory(),
+                correlation_id=assignment.correlation_id,
+                parent_span_id=assignment.message_id,
+                sender_agent_id=self.config.worker_agent_id,
+                recipient_agent_id=self.config.orchestrator_agent_id,
+                payload_schema_ref=self.config.task_result_payload_schema_ref,
+                idempotency_key=assignment.idempotency_key,
+                timestamp=self.clock.now(),
+                message_type="TASK_RESULT",
+                payload={
+                    **dict(model_result),
+                    "tool_name": tool_invocation.name,
+                    "tool_arguments": dict(tool_invocation.arguments),
+                },
+            )
+            self.publisher.publish(self.config.task_result_subject, result_message.to_dict(), headers=inject_trace_headers())
+            return True
+
+    @staticmethod
+    def _delivery_attempts(headers: Mapping[str, Any]) -> int:
+        value = headers.get("Nats-Num-Delivered", "1")
+        try:
+            return max(1, int(str(value)))
+        except (TypeError, ValueError):
+            return 1
+
+    @staticmethod
+    def _retry_delay_seconds(attempts: int) -> int:
+        return min(120, 5 * (2 ** max(0, attempts - 1)))
 
 
 class SystemClock:

@@ -41,10 +41,15 @@ class FakeIdempotencyRepository:
 
 class FakePublisher:
     def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, object]]] = []
+        self.published: list[tuple[str, dict[str, object], dict[str, str] | None]] = []
 
-    def publish(self, subject: str, message: dict[str, object]) -> None:
-        self.published.append((subject, message))
+    def publish(
+        self,
+        subject: str,
+        message: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.published.append((subject, message, headers))
 
 
 class CountingWebSearch:
@@ -103,11 +108,12 @@ class AgentWorkerTests(unittest.TestCase):
         self.assertEqual(1, len(web_search.calls))
         self.assertEqual("Automated Research Pipeline planner", web_search.calls[0]["query"])
         self.assertEqual(1, len(publisher.published))
-        subject, message = publisher.published[0]
+        subject, message, headers = publisher.published[0]
         self.assertEqual("nexus.task-result", subject)
         self.assertEqual("TASK_RESULT", message["message_type"])
         self.assertEqual("COMPLETED", message["payload"]["status"])
         self.assertEqual("web_search", message["payload"]["tool_name"])
+        self.assertIsInstance(headers, dict)
 
     def test_duplicate_idempotency_key_skips_tool_and_publish(self) -> None:
         web_search = CountingWebSearch()
@@ -133,6 +139,28 @@ class AgentWorkerTests(unittest.TestCase):
 
         with self.assertRaises(ToolExecutionDeniedError):
             sandbox.execute(ToolInvocation(name="shell", arguments={"command": "rm -rf /"}))
+
+    def test_process_assignment_rejects_forbidden_tool_arguments(self) -> None:
+        class ForbiddenToolModel:
+            def plan_tool_invocation(self, assignment: TaskAssignment) -> ToolInvocation:
+                return ToolInvocation(name="web_search", arguments={"command": "sh"})
+
+            def compose_result(self, assignment: TaskAssignment, tool_result: dict[str, object]) -> dict[str, object]:
+                return {"status": "UNUSED"}
+
+        sandbox = ToolExecutionSandbox({"web_search": CountingWebSearch()})
+        publisher = FakePublisher()
+        worker = AgentWorker(
+            idempotency_repository=FakeIdempotencyRepository([True]),
+            tool_sandbox=sandbox,
+            agent_model=ForbiddenToolModel(),
+            publisher=publisher,
+            clock=FixedClock(datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)),
+            identifier_factory=lambda: "result-1",
+        )
+
+        with self.assertRaises(ToolExecutionDeniedError):
+            worker.process_assignment(self._assignment())
 
 
 if __name__ == "__main__":

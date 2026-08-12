@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
 
+from .otel_setup import TelemetryConfig, configure_otel, inject_trace_headers, message_span
 from .state_machine import WorkflowExecutionState
 from .workflow_validation import validate_workflow_graph
 
@@ -124,7 +125,12 @@ class LeaseManager(Protocol):
 
 
 class MessagePublisher(Protocol):
-    def publish(self, subject: str, message: Mapping[str, Any]) -> None:
+    def publish(
+        self,
+        subject: str,
+        message: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         raise NotImplementedError
 
 
@@ -163,66 +169,72 @@ class WorkflowOrchestrator:
         self.clock = clock
         self.config = config or OrchestratorConfig()
         self.identifier_factory = identifier_factory or (lambda: uuid4().hex)
+        configure_otel(TelemetryConfig(service_name="nexus.orchestrator"))
 
     def start_workflow(self, workflow_id: str) -> WorkflowExecutionRecord:
-        workflow_definition = self.definition_repository.load(workflow_id)
-        validate_workflow_graph(workflow_definition.to_validation_payload())
+        with message_span(
+            service_name="nexus.orchestrator",
+            span_name="orchestrator.start_workflow",
+            attributes={"workflow.id": workflow_id},
+        ):
+            workflow_definition = self.definition_repository.load(workflow_id)
+            validate_workflow_graph(workflow_definition.to_validation_payload())
 
-        started_at = self.clock.now()
-        pending_execution = WorkflowExecutionRecord(
-            execution_id=self.identifier_factory(),
-            workflow_id=workflow_definition.workflow_id,
-            state=WorkflowExecutionState.PENDING,
-            current_node_id=workflow_definition.entry_node_id,
-            last_committed_node_id=None,
-            version=0,
-            lease_owner=None,
-            lease_expires_at=None,
-            heartbeat_at=None,
-            resume_token=None,
-            human_input_required=False,
-            failure_reason=None,
-            created_at=started_at,
-            updated_at=started_at,
-        )
-        execution = self.execution_repository.create(pending_execution)
+            started_at = self.clock.now()
+            pending_execution = WorkflowExecutionRecord(
+                execution_id=self.identifier_factory(),
+                workflow_id=workflow_definition.workflow_id,
+                state=WorkflowExecutionState.PENDING,
+                current_node_id=workflow_definition.entry_node_id,
+                last_committed_node_id=None,
+                version=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                heartbeat_at=None,
+                resume_token=None,
+                human_input_required=False,
+                failure_reason=None,
+                created_at=started_at,
+                updated_at=started_at,
+            )
+            execution = self.execution_repository.create(pending_execution)
 
-        lease_key = f"workflow-execution:{execution.execution_id}"
-        lease = self.lease_manager.acquire(lease_key, self.config.orchestrator_agent_id, self.config.lease_ttl_seconds)
-        if lease is None:
-            raise LeaseUnavailableError(f"unable to acquire lease for {lease_key}")
+            lease_key = f"workflow-execution:{execution.execution_id}"
+            lease = self.lease_manager.acquire(lease_key, self.config.orchestrator_agent_id, self.config.lease_ttl_seconds)
+            if lease is None:
+                raise LeaseUnavailableError(f"unable to acquire lease for {lease_key}")
 
-        running_execution = self.execution_repository.transition_pending_to_running(
-            execution_id=execution.execution_id,
-            lease_owner=lease.owner_id,
-            lease_expires_at=lease.expires_at,
-            heartbeat_at=self.clock.now(),
-            expected_version=execution.version,
-        )
+            running_execution = self.execution_repository.transition_pending_to_running(
+                execution_id=execution.execution_id,
+                lease_owner=lease.owner_id,
+                lease_expires_at=lease.expires_at,
+                heartbeat_at=self.clock.now(),
+                expected_version=execution.version,
+            )
 
-        entry_node = self._require_entry_node(workflow_definition)
-        message = TaskAssignmentMessage(
-            message_id=self.identifier_factory(),
-            correlation_id=execution.execution_id,
-            parent_span_id=None,
-            sender_agent_id=self.config.orchestrator_agent_id,
-            recipient_agent_id=str(entry_node["agent_role"]),
-            payload_schema_ref=self.config.task_assignment_payload_schema_ref,
-            idempotency_key=f"{execution.execution_id}:{workflow_definition.entry_node_id}",
-            timestamp=self.clock.now(),
-            message_type="TASK_ASSIGNMENT",
-            payload={
-                "execution_id": execution.execution_id,
-                "workflow_id": workflow_definition.workflow_id,
-                "workflow_name": workflow_definition.name,
-                "node_id": workflow_definition.entry_node_id,
-                "agent_role": entry_node["agent_role"],
-                "lease_owner": lease.owner_id,
-                "lease_expires_at": lease.expires_at.isoformat(),
-            },
-        )
-        self.publisher.publish(self.config.task_assignment_subject, message.to_dict())
-        return running_execution
+            entry_node = self._require_entry_node(workflow_definition)
+            message = TaskAssignmentMessage(
+                message_id=self.identifier_factory(),
+                correlation_id=execution.execution_id,
+                parent_span_id=None,
+                sender_agent_id=self.config.orchestrator_agent_id,
+                recipient_agent_id=str(entry_node["agent_role"]),
+                payload_schema_ref=self.config.task_assignment_payload_schema_ref,
+                idempotency_key=f"{execution.execution_id}:{workflow_definition.entry_node_id}",
+                timestamp=self.clock.now(),
+                message_type="TASK_ASSIGNMENT",
+                payload={
+                    "execution_id": execution.execution_id,
+                    "workflow_id": workflow_definition.workflow_id,
+                    "workflow_name": workflow_definition.name,
+                    "node_id": workflow_definition.entry_node_id,
+                    "agent_role": entry_node["agent_role"],
+                    "lease_owner": lease.owner_id,
+                    "lease_expires_at": lease.expires_at.isoformat(),
+                },
+            )
+            self.publisher.publish(self.config.task_assignment_subject, message.to_dict(), headers=inject_trace_headers())
+            return running_execution
 
     @staticmethod
     def _require_entry_node(workflow_definition: WorkflowDefinition) -> Mapping[str, Any]:

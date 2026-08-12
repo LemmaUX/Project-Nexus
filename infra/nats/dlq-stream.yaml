@@ -1,0 +1,16 @@
+name: NEXUS_DLQ
+subjects:
+  - nexus.dlq.agent.>
+retention: limits
+storage: file
+discard: old
+max_age: 720h
+max_bytes: -1
+max_msgs: -1
+max_msg_size: -1
+duplicate_window: 2m
+allow_rollup_hdrs: false
+deny_delete: true
+deny_purge: false
+sealed: false
+num_replicas: 1

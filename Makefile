@@ -1,5 +1,5 @@
 PYTHON ?= python
-COMPOSE ?= docker compose
+COMPOSE ?= docker compose -f infra/docker-compose.yml
 
 .PHONY: test up down validate
 

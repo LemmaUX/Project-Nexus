@@ -86,10 +86,15 @@ class FakeLeaseManager:
 
 class FakePublisher:
     def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, object]]] = []
+        self.published: list[tuple[str, dict[str, object], dict[str, str] | None]] = []
 
-    def publish(self, subject: str, message: dict[str, object]) -> None:
-        self.published.append((subject, message))
+    def publish(
+        self,
+        subject: str,
+        message: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.published.append((subject, message, headers))
 
 
 class OrchestratorTests(unittest.TestCase):
