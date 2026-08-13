@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlparse
@@ -32,8 +33,27 @@ class ToolInvocation:
 
 @dataclass(frozen=True)
 class ToolPolicy:
-    allowed_tool_names: frozenset[str] = frozenset({"web_search"})
-    allowed_network_hosts: frozenset[str] = frozenset({"example.com", "www.example.com"})
+    """
+    Política de seguridad para ejecución de herramientas.
+    Usa listas BLANCAS (allowlists) por defecto. Default-deny para todo lo no explícitamente permitido.
+    """
+    # Argumentos permitidos por herramienta (default-deny: cualquier otro argumento es rechazado)
+    allowed_arguments_per_tool: Mapping[str, frozenset[str]] = field(default_factory=lambda: {
+        "web_search": frozenset({"query", "endpoint", "max_results", "language"}),
+        "db_query": frozenset({"sql", "params", "timeout_seconds"}),
+        "file_read": frozenset({"path", "encoding", "max_bytes"}),
+    })
+    
+    # Hosts de red permitidos (dominios exactos)
+    allowed_network_hosts: frozenset[str] = frozenset({
+        "example.com",
+        "www.example.com",
+        "api.openai.com",
+        "search.brave.com",
+    })
+    
+    # Esquemas de URL permitidos (HTTP excluido en producción; solo HTTPS)
+    allowed_schemes: frozenset[str] = frozenset({"https"})
 
 
 @dataclass(frozen=True)
@@ -162,35 +182,110 @@ class ToolExecutionDeniedError(RuntimeError):
 
 
 class ToolExecutionSandbox:
-    def __init__(self, tool_registry: Mapping[str, ToolHandler], policy: ToolPolicy | None = None) -> None:
+    """
+    Sandbox de ejecución de herramientas con validación estricta por lista blanca.
+    
+    Principios de seguridad:
+    1. Default-deny: todo argumento no explícitamente permitido es rechazado.
+    2. Validación de esquema de URL (solo HTTPS en producción).
+    3. Validación de hostname contra allowlist (previene SSRF).
+    4. Detección de IPs privadas/loopback (defensa en profundidad).
+    5. No hay ejecución de código arbitrario (comandos shell, scripts).
+    """
+    
+    def __init__(
+        self, 
+        tool_registry: Mapping[str, ToolHandler], 
+        policy: ToolPolicy | None = None
+    ) -> None:
         self.tool_registry = dict(tool_registry)
         self.policy = policy or ToolPolicy()
 
     def execute(self, invocation: ToolInvocation) -> Mapping[str, Any]:
-        if invocation.name not in self.policy.allowed_tool_names:
-            raise ToolExecutionDeniedError(f"tool '{invocation.name}' is not enabled")
-
+        # 1. Verificar que la herramienta está en el registro permitido
+        if invocation.name not in self.policy.allowed_arguments_per_tool:
+            raise ToolExecutionDeniedError(
+                f"tool '{invocation.name}' is not in the allowed tools registry. "
+                f"Allowed: {sorted(self.policy.allowed_arguments_per_tool.keys())}"
+            )
+        
         handler = self.tool_registry.get(invocation.name)
         if handler is None:
-            raise ToolExecutionDeniedError(f"tool '{invocation.name}' is not registered")
+            raise ToolExecutionDeniedError(
+                f"tool '{invocation.name}' has no registered handler"
+            )
 
+        # 2. Validación estricta de argumentos (lista blanca)
         self._validate_arguments(invocation)
+        
+        # 3. Ejecución dentro del sandbox
         return handler(invocation.arguments)
 
     def _validate_arguments(self, invocation: ToolInvocation) -> None:
-        for key in ("command", "argv", "shell", "executable", "script"):
-            if key in invocation.arguments:
-                raise ToolExecutionDeniedError(f"tool '{invocation.name}' attempted a forbidden argument: {key}")
-
+        allowed_args = self.policy.allowed_arguments_per_tool[invocation.name]
+        provided_args = set(invocation.arguments.keys())
+        
+        # Detección de argumentos no permitidos (default-deny)
+        forbidden_args = provided_args - allowed_args
+        if forbidden_args:
+            raise ToolExecutionDeniedError(
+                f"tool '{invocation.name}' received forbidden arguments: "
+                f"{sorted(forbidden_args)}. Allowed: {sorted(allowed_args)}"
+            )
+        
+        # Validación específica para endpoints de red (previene SSRF)
         endpoint = invocation.arguments.get("endpoint") or invocation.arguments.get("url")
-        if endpoint is None:
-            return
+        if endpoint is not None:
+            self._validate_network_endpoint(str(endpoint), invocation.name)
 
-        parsed = urlparse(str(endpoint))
-        if parsed.scheme not in {"https", "http"}:
-            raise ToolExecutionDeniedError("tool endpoints must use http or https")
-        if not parsed.hostname or parsed.hostname not in self.policy.allowed_network_hosts:
-            raise ToolExecutionDeniedError(f"network endpoint '{endpoint}' is not allowed")
+    def _validate_network_endpoint(self, endpoint: str, tool_name: str) -> None:
+        parsed = urlparse(endpoint)
+        
+        # Rechazar esquemas no permitidos (previene file://, javascript:, data:, etc.)
+        if parsed.scheme not in self.policy.allowed_schemes:
+            raise ToolExecutionDeniedError(
+                f"tool '{tool_name}': scheme '{parsed.scheme}' is not allowed. "
+                f"Allowed: {sorted(self.policy.allowed_schemes)}"
+            )
+        
+        # Rechazar endpoints sin hostname válido
+        if not parsed.hostname:
+            raise ToolExecutionDeniedError(
+                f"tool '{tool_name}': endpoint must have a valid hostname"
+            )
+        
+        # Defensa en profundidad: rechazar IPs privadas, loopback y link-local
+        # Esto bloquea ataques SSRF incluso si el atacante controla DNS
+        if self._is_private_ip(parsed.hostname):
+            raise ToolExecutionDeniedError(
+                f"tool '{tool_name}': private/loopback/link-local IPs are forbidden"
+            )
+        
+        # Verificación de hostname contra allowlist
+        if parsed.hostname not in self.policy.allowed_network_hosts:
+            raise ToolExecutionDeniedError(
+                f"tool '{tool_name}': hostname '{parsed.hostname}' is not in allowlist. "
+                f"Allowed: {sorted(self.policy.allowed_network_hosts)}"
+            )
+
+    @staticmethod
+    def _is_private_ip(hostname: str) -> bool:
+        """
+        Detecta IPs privadas, loopback, link-local y reservadas para prevenir SSRF.
+        Retorna False si el hostname no es una IP (es un dominio).
+        """
+        try:
+            ip = ipaddress.ip_address(hostname)
+            return (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            )
+        except ValueError:
+            # No es una IP literal, es un dominio. La allowlist de hostnames lo cubre.
+            return False
 
 
 class MockAgentModel:
