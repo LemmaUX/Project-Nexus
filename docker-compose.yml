@@ -1,4 +1,7 @@
 services:
+  # =====================================================
+  # POSTGRES
+  # =====================================================
   postgres:
     image: postgres:16-alpine
     environment:
@@ -14,24 +17,53 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - nexus-network
 
+  # =====================================================
+  # REDIS (con límites de memoria)
+  # =====================================================
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    container_name: nexus-redis
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--save"
+      - "60"
+      - "1000"
+      - "--save"
+      - "300"
+      - "100"
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 5s
-      retries: 20
-    volumes:
-      - redis_data:/data
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks:
+      - nexus-network
 
+  # =====================================================
+  # NATS
+  # =====================================================
   nats:
     build:
       context: .
       dockerfile: infra/nats/Dockerfile
+    container_name: nexus-nats
     command: ["-js", "-m", "8222"]
     ports:
       - "4222:4222"
@@ -41,7 +73,90 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - nexus-network
+
+  # =====================================================
+  # OPENTELEMETRY COLLECTOR
+  # =====================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: nexus-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./infra/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    depends_on:
+      - tempo
+    networks:
+      - nexus-network
+
+  # =====================================================
+  # GRAFANA TEMPO
+  # =====================================================
+  tempo:
+    image: grafana/tempo:2.4.0
+    container_name: nexus-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+    networks:
+      - nexus-network
+
+  # =====================================================
+  # PROMETHEUS
+  # =====================================================
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: nexus-prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    networks:
+      - nexus-network
+
+  # =====================================================
+  # GRAFANA
+  # =====================================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: nexus-grafana
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    depends_on:
+      - tempo
+      - prometheus
+    networks:
+      - nexus-network
+
+networks:
+  nexus-network:
+    driver: bridge
 
 volumes:
   postgres_data:
   redis_data:
+  nats_data:
+  tempo_data:
+  prometheus_data:
+  grafana_data:

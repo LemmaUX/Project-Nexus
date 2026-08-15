@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - optional observability dependency
 @dataclass(frozen=True)
 class TelemetryConfig:
     service_name: str
-    otlp_endpoint: str = "http://localhost:4317"
+    otlp_endpoint: str = "localhost:4317"  # OTel Collector gRPC endpoint (fuera de Docker)
     insecure: bool = True
     resource_attributes: Mapping[str, str] | None = None
 
