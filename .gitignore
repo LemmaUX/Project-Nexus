@@ -1,34 +1,19 @@
 ```
-# Dependencies
+# Test-specific cache and temporary files
+.tests/
+.pytest_cache/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.pytest_cache/
-.mypy_cache/
+
+# Coverage reports
 .coverage
-coverage/
 htmlcov/
+.coverage.*
 
-# Environment
-.env
-.env.local
-*.env.*
-
-# Logs
+# Configuration and logs
+pytest.ini
 *.log
-
-# Temporary files
 *.tmp
-*.swp
-*.swo
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# Build artifacts
-dist/
-build/
-*.egg-info/
 ```
