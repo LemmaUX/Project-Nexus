@@ -1,6 +1,9 @@
 """
 Chaos Experiment 1: Redis Failure - MTTR Validation
 
+CRITICAL FIX: Added Recovery Manager validation to ensure workflows are not just
+detected as expired, but actually RE-ACQUIRED and resumed by the Recovery Manager.
+
 Hypothesis: If Redis dies during workflow execution, the Orchestrator will 
 detect lease loss within 35 seconds (TTL 30s + 5s heartbeat gap) and the 
 Recovery Manager will re-acquire the workflow without data loss.
@@ -9,11 +12,7 @@ Success Criteria:
 - Workflow recovers and completes within 60s of crash
 - Zero duplicate task processing (idempotency verified)
 - Zero lost messages (JetStream durability)
-
-Note: This test requires Docker to be available. Run with:
-    $ pytest tests/chaos/test_01_redis_failure.py -v -s -m chaos
-    
-If Docker is not available, the test will be skipped gracefully.
+- Recovery Manager attempts and completes recovery
 """
 
 import asyncio
@@ -117,7 +116,8 @@ class TestRedisFailureMTTR:
         4. Wait for lease TTL expiry (30s + 5s buffer)
         5. Restart Redis
         6. Verify workflow recovers within 60s total
-        7. Verify no duplicate processing occurred
+        7. Verify Recovery Manager attempted and completed recovery
+        8. Verify no duplicate processing occurred
         """
         
         # --- Phase 1: Establish Baseline ---
@@ -139,6 +139,11 @@ class TestRedisFailureMTTR:
         # Record initial idempotency claims (for duplicate detection)
         claims_before = chaos_env.query_metric(
             'idempotency_claims_total'
+        )
+        
+        # Record initial recovery attempts
+        recovery_attempts_before = chaos_env.query_metric(
+            'nexus_recovery_manager_recovery_attempts_total'
         )
         
         # --- Phase 2: Inject Chaos ---
@@ -190,7 +195,42 @@ class TestRedisFailureMTTR:
         )
         print(f"✅ MTTR: {recovery_time:.1f}s (SLA: {MAX_RECOVERY_TIME_SECONDS}s)")
         
-        # Criterion 2: No duplicate processing
+        # Criterion 2: Recovery Manager attempted recovery
+        recovery_attempts_after = chaos_env.query_metric(
+            'nexus_recovery_manager_recovery_attempts_total'
+        )
+        recovery_attempts = recovery_attempts_after - recovery_attempts_before
+        assert recovery_attempts >= 1, (
+            f"Recovery Manager did not attempt recovery "
+            f"(before: {recovery_attempts_before}, after: {recovery_attempts_after})"
+        )
+        print(f"✅ Recovery Manager attempted: {recovery_attempts} recovery/ies")
+        
+        # CRITICAL FIX: Verify workflow state transitions through Recovery Manager
+        # Expected: RUNNING -> CRASHED -> PENDING -> RUNNING
+        print("\n📋 Verifying workflow state transitions...")
+        
+        crashed_count = chaos_env.query_metric(
+            'workflow_execution_state_transitions_total{from="RUNNING",to="CRASHED"}'
+        )
+        pending_from_crashed = chaos_env.query_metric(
+            'workflow_execution_state_transitions_total{from="CRASHED",to="PENDING"}'
+        )
+        running_from_pending = chaos_env.query_metric(
+            'workflow_execution_state_transitions_total{from="PENDING",to="RUNNING"}'
+        )
+        
+        # Must see at least one complete recovery cycle
+        assert crashed_count >= 1, "No RUNNING->CRASHED transition detected"
+        print(f"✅ RUNNING->CRASHED transitions: {crashed_count}")
+        
+        assert pending_from_crashed >= 1, "No CRASHED->PENDING transition detected"
+        print(f"✅ CRASHED->PENDING transitions: {pending_from_crashed}")
+        
+        assert running_from_pending >= 1, "No PENDING->RUNNING transition detected"
+        print(f"✅ PENDING->RUNNING transitions: {running_from_pending}")
+        
+        # Criterion 3: No duplicate processing
         claims_after = chaos_env.query_metric('idempotency_claims_total')
         duplicate_processing = claims_after > claims_before + 1  # Allow 1 for recovery
         assert not duplicate_processing, (
@@ -198,7 +238,7 @@ class TestRedisFailureMTTR:
         )
         print(f"✅ No duplicate processing (claims: {claims_before} -> {claims_after})")
         
-        # Criterion 3: No lost messages
+        # Criterion 4: No lost messages
         # (Verify workflow eventually completes or fails gracefully, not stuck)
         time.sleep(10)
         final_state = chaos_env.query_metric(
@@ -213,6 +253,8 @@ class TestRedisFailureMTTR:
         
         print(f"\n🎉 EXPERIMENT PASSED: Redis failure handled within SLA")
         print(f"   MTTR: {recovery_time:.1f}s")
+        print(f"   Recovery attempts: {recovery_attempts}")
+        print(f"   State transitions verified: Yes")
         print(f"   Duplicates: 0")
         print(f"   Data loss: 0")
 

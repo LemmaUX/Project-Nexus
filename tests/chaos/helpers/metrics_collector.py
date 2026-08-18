@@ -1,9 +1,18 @@
 """
 Metrics collector for Prometheus-based observability during chaos tests.
+
+CRITICAL: This class raises exceptions on metric query failures to prevent
+false positives in chaos tests. Silent failures would allow tests to pass
+when Prometheus is down, giving false confidence in system resilience.
 """
 
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
+
+
+class MetricsCollectorError(Exception):
+    """Raised when metric collection fails."""
+    pass
 
 
 class MetricsCollector:
@@ -12,17 +21,43 @@ class MetricsCollector:
     def __init__(self, prometheus_url: str = "http://localhost:9090"):
         from prometheus_api_client import PrometheusConnect
         self.prometheus = PrometheusConnect(url=prometheus_url, disable_ssl=True)
+        self._verify_connection()
+    
+    def _verify_connection(self) -> None:
+        """Verify Prometheus is reachable on initialization."""
+        try:
+            self.prometheus.check_prometheus_connection()
+        except Exception as e:
+            raise MetricsCollectorError(f"Cannot connect to Prometheus at {self.prometheus.url}: {e}")
     
     def query_metric(self, metric_name: str) -> float:
-        """Query current value of a Prometheus metric."""
+        """
+        Query current value of a Prometheus metric.
+        
+        Raises:
+            MetricsCollectorError: If query fails or returns no data
+        """
         try:
             result = self.prometheus.custom_query(query=metric_name)
             if not result:
-                return 0.0
+                raise MetricsCollectorError(f"No data returned for metric: {metric_name}")
             return float(result[0]['value'][1])
+        except MetricsCollectorError:
+            raise
         except Exception as e:
-            print(f"⚠️ Error querying metric {metric_name}: {e}")
-            return 0.0
+            raise MetricsCollectorError(f"Failed to query {metric_name}: {e}")
+    
+    def query_metric_safe(self, metric_name: str) -> Optional[float]:
+        """
+        Query metric with graceful fallback to None (use only for optional checks).
+        
+        Returns:
+            Metric value or None if unavailable
+        """
+        try:
+            return self.query_metric(metric_name)
+        except MetricsCollectorError:
+            return None
     
     def query_metric_range(
         self, 
@@ -35,14 +70,13 @@ class MetricsCollector:
         try:
             result = self.prometheus.custom_query_range(
                 query=metric_name,
-                start_time=start_time,
-                end_time=end_time,
+                start=start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end=end_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 step=step
             )
             return result if result else []
         except Exception as e:
-            print(f"⚠️ Error querying range metric {metric_name}: {e}")
-            return []
+            raise MetricsCollectorError(f"Failed to query range for {metric_name}: {e}")
     
     def get_workflow_state(self, state: str = "RUNNING") -> float:
         """Get count of workflows in a specific state."""
@@ -120,6 +154,7 @@ class MetricsCollector:
         poll_interval: float = 1.0
     ) -> bool:
         """Wait for a metric to satisfy a condition."""
+        import time
         start_time = datetime.now()
         
         while (datetime.now() - start_time).total_seconds() < timeout:
@@ -129,3 +164,52 @@ class MetricsCollector:
             time.sleep(poll_interval)
         
         return False
+    
+    def get_state_transitions(
+        self,
+        from_state: str,
+        to_state: str,
+        start_time: datetime,
+        end_time: Optional[datetime] = None
+    ) -> int:
+        """
+        Count workflow state transitions from one state to another.
+        
+        Args:
+            from_state: Source state (e.g., 'RUNNING')
+            to_state: Destination state (e.g., 'CRASHED')
+            start_time: Start of time range
+            end_time: End of time range (defaults to now)
+        
+        Returns:
+            Count of transitions observed
+        """
+        if end_time is None:
+            end_time = datetime.now()
+        
+        metric = f'workflow_execution_state_transitions_total{{from="{from_state}",to="{to_state}"}}'
+        data = self.query_metric_range(metric, start_time, end_time)
+        
+        if not data:
+            return 0
+        
+        # Sum all values in the range
+        total = 0
+        for point in data[0].get('values', []):
+            total = max(total, float(point[1]))
+        
+        return total
+    
+    def get_messages_published(self) -> float:
+        """Get total NATS messages published."""
+        return self.query_metric('nats_messages_published_total')
+    
+    def get_messages_processed(self) -> float:
+        """Get total agent messages processed."""
+        return self.query_metric('agent_messages_processed_total')
+    
+    def get_lease_acquisitions_by_instance(self, instance_id: str, status: str = "acquired") -> float:
+        """Get lease acquisitions for a specific orchestrator instance."""
+        return self.query_metric(
+            f'nexus_orchestrator_lease_acquisition_total{{status="{status}",instance_id="{instance_id}"}}'
+        )

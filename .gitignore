@@ -6,14 +6,33 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
+venv/
+.env
+.env.local
+.env.*
 
-# Coverage reports
+# Test and coverage
+.pytest_cache/
 .coverage
 htmlcov/
 .coverage.*
 
-# Configuration and logs
-pytest.ini
+# Logs
 *.log
-*.tmp
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
 ```

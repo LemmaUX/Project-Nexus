@@ -13,8 +13,17 @@ Success Criteria:
 import asyncio
 import time
 import pytest
-from tests.chaos.helpers.docker_utils import DockerUtils
-from tests.chaos.helpers.metrics_collector import MetricsCollector
+
+# Fix import path for chaos helpers
+import sys
+sys.path.insert(0, '.')
+
+try:
+    from tests.chaos.helpers.docker_utils import DockerUtils
+    from tests.chaos.helpers.metrics_collector import MetricsCollector
+except ImportError:
+    from chaos.helpers.docker_utils import DockerUtils
+    from chaos.helpers.metrics_collector import MetricsCollector
 
 
 OTEL_COLLECTOR_CONTAINER = "nexus-otel-collector"
