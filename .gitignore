@@ -1,5 +1,7 @@
 ```
-# Dependencies
+# Test-specific cache and temporary files
+.tests/
+.pytest_cache/
 __pycache__/
 *.pyc
 *.pyo
@@ -13,8 +15,8 @@ venv/
 # Test and coverage
 .pytest_cache/
 .coverage
-coverage/
 htmlcov/
+.coverage.*
 
 # Logs
 *.log
