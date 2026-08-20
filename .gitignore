@@ -1,38 +1,8 @@
 ```
-# Test-specific cache and temporary files
-.tests/
-.pytest_cache/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.venv/
-venv/
-.env
-.env.local
-.env.*
-
-# Test and coverage
-.pytest_cache/
-.coverage
-htmlcov/
-.coverage.*
-
-# Logs
+# Logs and temporary files
 *.log
+*.tmp
 
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build artifacts
-dist/
-build/
-*.egg-info/
+# Performance and load test outputs
+load_test_output.txt
 ```

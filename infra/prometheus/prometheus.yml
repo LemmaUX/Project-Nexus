@@ -11,3 +11,18 @@ scrape_configs:
     static_configs:
       - targets: ['nats:8222']
     metrics_path: '/varz'
+
+  # Load Generator metrics (host machine)
+  - job_name: 'load-generator'
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+
+  # Orchestrator metrics (host machine)
+  - job_name: 'orchestrator'
+    static_configs:
+      - targets: ['host.docker.internal:9091']
+
+  # Agent Worker metrics (host machine)
+  - job_name: 'agent-worker'
+    static_configs:
+      - targets: ['host.docker.internal:9092']

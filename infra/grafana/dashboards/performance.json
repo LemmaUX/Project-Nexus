@@ -1,0 +1,169 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Nexus Performance Dashboard",
+    "tags": ["performance", "load-testing"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Current TPS",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "load_generator_current_tps",
+            "legendFormat": "TPS"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 5000},
+                {"color": "green", "value": 9000}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Publish Latency (p99)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(load_generator_publish_latency_seconds_bucket[1m]))",
+            "legendFormat": "p99"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(load_generator_publish_latency_seconds_bucket[1m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(load_generator_publish_latency_seconds_bucket[1m]))",
+            "legendFormat": "p50"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 2
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Messages Published",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(load_generator_messages_published_total)",
+            "legendFormat": "Total"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(load_generator_messages_published_total{status=\"failed\"}[1m]) / rate(load_generator_messages_published_total[1m]) * 100",
+            "legendFormat": "Error %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.1},
+                {"color": "red", "value": 1}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Orchestrator Workflows",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "nexus_orchestrator_active_workflows",
+            "legendFormat": "{{state}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 6,
+        "title": "Agent Processing Rate",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(nexus_agent_messages_processed_total[1m])",
+            "legendFormat": "{{agent_role}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 7,
+        "title": "Consumer Lag",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "nexus_agent_consumer_lag_messages",
+            "legendFormat": "Lag"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 100},
+                {"color": "red", "value": 1000}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}
+      },
+      {
+        "id": 8,
+        "title": "Tool Execution Duration (p95)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(nexus_agent_tool_execution_duration_seconds_bucket[1m]))",
+            "legendFormat": "{{tool_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+}
