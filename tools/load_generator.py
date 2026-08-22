@@ -7,6 +7,7 @@ Usage:
     python tools/load_generator.py --tps 10000 --duration 600 --ramp-up 60
 """
 
+from collections import deque
 import argparse
 import asyncio
 import json
@@ -172,8 +173,8 @@ class LoadGenerator:
         self.running = False
         self.start_time: Optional[float] = None
         
-        # Performance tracking
-        self.latencies: list[float] = []
+        # Performance tracking - use deque with maxlen to prevent memory leaks
+        self.latencies: deque[float] = deque(maxlen=10000)  # Keep last 10k samples
         self.published_count = 0
         self.failed_count = 0
     
