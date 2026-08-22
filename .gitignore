@@ -1,8 +1,23 @@
 ```
-# Logs and temporary files
-*.log
-*.tmp
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Performance and load test outputs
-load_test_output.txt
+# Dependencies
+.venv/
+venv/
+env/
+.env
+.env.local
+.env.*
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
 ```

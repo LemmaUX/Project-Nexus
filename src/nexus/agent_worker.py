@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
@@ -9,6 +10,16 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from .otel_setup import TelemetryConfig, configure_otel, inject_trace_headers, message_span
+from .agent_metrics import (
+    MESSAGES_PROCESSED_TOTAL,
+    MESSAGE_PROCESSING_DURATION,
+    TOOL_EXECUTIONS_TOTAL,
+    TOOL_EXECUTION_DURATION,
+    IDEMPOTENCY_CHECKS_TOTAL,
+    CONSUMER_LAG,
+    CONSUMER_FETCH_DURATION,
+    ERRORS_TOTAL,
+)
 
 
 @dataclass(frozen=True)
@@ -339,10 +350,19 @@ class AgentWorker:
         )
 
         while True:
-            messages = await consumer.fetch(
-                batch=self.config.max_batch_size,
-                timeout=self.config.fetch_timeout_seconds,
-            )
+            fetch_start = time.time()
+            try:
+                messages = await consumer.fetch(
+                    batch=self.config.max_batch_size,
+                    timeout=self.config.fetch_timeout_seconds,
+                )
+                CONSUMER_FETCH_DURATION.observe(time.time() - fetch_start)
+                # Update consumer lag (pending messages count)
+                lag = consumer.pending_messages_limit - len(messages)
+                CONSUMER_LAG.set(max(0, lag))
+            except Exception as e:
+                ERRORS_TOTAL.labels(error_type='fetch_error').inc()
+                continue
             for message in messages:
                 await self._handle_message(message)
 
@@ -353,22 +373,31 @@ class AgentWorker:
             assignment = TaskAssignment.from_mapping(json.loads(raw_payload))
         except (json.JSONDecodeError, ValueError):
             await message.term()
+            ERRORS_TOTAL.labels(error_type='parse_error').inc()
             return
 
+        processing_start = time.time()
         try:
             published = self.process_assignment(assignment, trace_headers=headers)
-        except ToolExecutionDeniedError:
+            processing_duration = time.time() - processing_start
+            MESSAGE_PROCESSING_DURATION.labels(agent_role=assignment.agent_role, stage='total').observe(processing_duration)
+            
+            if published:
+                MESSAGES_PROCESSED_TOTAL.labels(agent_role=assignment.agent_role, status='success').inc()
+                await message.ack()
+            else:
+                # Duplicate message (idempotency check failed)
+                MESSAGES_PROCESSED_TOTAL.labels(agent_role=assignment.agent_role, status='duplicate').inc()
+                await message.ack()
+        except ToolExecutionDeniedError as e:
+            MESSAGES_PROCESSED_TOTAL.labels(agent_role=assignment.agent_role, status='denied').inc()
+            ERRORS_TOTAL.labels(error_type='tool_denied').inc()
             await message.term()
-            return
-        except Exception:
+        except Exception as e:
+            MESSAGES_PROCESSED_TOTAL.labels(agent_role=assignment.agent_role, status='failed').inc()
+            ERRORS_TOTAL.labels(error_type='processing_error').inc()
             attempts = self._delivery_attempts(headers)
             await message.nak(delay=self._retry_delay_seconds(attempts))
-            return
-
-        if published:
-            await message.ack()
-        else:
-            await message.ack()
 
     def process_assignment(self, assignment: TaskAssignment, trace_headers: Mapping[str, str] | None = None) -> bool:
         with message_span(
@@ -382,23 +411,34 @@ class AgentWorker:
                 "workflow.execution_id": assignment.execution_id,
             },
         ):
+            idempotency_start = time.time()
             with message_span(service_name="nexus.agent.researcher", span_name="agent.idempotency_check"):
                 claimed = self.idempotency_repository.claim(
                     assignment.idempotency_key,
                     assignment.execution_id,
                     assignment.message_id,
                 )
+            MESSAGE_PROCESSING_DURATION.labels(agent_role=assignment.agent_role, stage='idempotency_check').observe(time.time() - idempotency_start)
+            
             if not claimed:
+                IDEMPOTENCY_CHECKS_TOTAL.labels(result='duplicate').inc()
                 return False
+            else:
+                IDEMPOTENCY_CHECKS_TOTAL.labels(result='new').inc()
 
             with message_span(service_name="nexus.agent.researcher", span_name="agent.tool_selection"):
                 tool_invocation = self.agent_model.plan_tool_invocation(assignment)
 
+            tool_start = time.time()
             with message_span(service_name="nexus.agent.researcher", span_name="agent.tool_execution"):
                 tool_result = self.tool_sandbox.execute(tool_invocation)
+            TOOL_EXECUTION_DURATION.labels(tool_name=tool_invocation.name).observe(time.time() - tool_start)
+            TOOL_EXECUTIONS_TOTAL.labels(tool_name=tool_invocation.name, status='success').inc()
 
+            compose_start = time.time()
             with message_span(service_name="nexus.agent.researcher", span_name="agent.compose_result"):
                 model_result = self.agent_model.compose_result(assignment, tool_result)
+            MESSAGE_PROCESSING_DURATION.labels(agent_role=assignment.agent_role, stage='compose_result').observe(time.time() - compose_start)
 
             result_message = TaskResultMessage(
                 message_id=self.identifier_factory(),

@@ -2,7 +2,7 @@
 Prometheus metrics for Orchestrator service.
 """
 
-from prometheus_client import Counter, Histogram, Gauge, Info
+from prometheus_client import Counter, Histogram, Gauge, Info, start_http_server
 
 # Workflow metrics
 WORKFLOW_EXECUTIONS_TOTAL = Counter(
@@ -57,9 +57,10 @@ SYSTEM_INFO = Info(
 )
 
 
-def init_metrics(instance_id: str, version: str = "1.0.0"):
-    """Initialize system info metrics."""
+def init_metrics(instance_id: str, version: str = "1.0.0", port: int = 9091):
+    """Initialize system info metrics and start HTTP server."""
     SYSTEM_INFO.info({
         'instance_id': instance_id,
         'version': version,
     })
+    start_http_server(port)

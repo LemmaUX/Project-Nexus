@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
@@ -8,6 +9,15 @@ from uuid import uuid4
 from .otel_setup import TelemetryConfig, configure_otel, inject_trace_headers, message_span
 from .state_machine import WorkflowExecutionState
 from .workflow_validation import validate_workflow_graph
+from .metrics import (
+    WORKFLOW_EXECUTIONS_TOTAL,
+    WORKFLOW_EXECUTION_DURATION,
+    WORKFLOW_STATE_TRANSITIONS,
+    LEASE_ACQUISITIONS_TOTAL,
+    LEASE_DURATION,
+    MESSAGE_PUBLISH_LATENCY,
+    ACTIVE_WORKFLOWS,
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +187,7 @@ class WorkflowOrchestrator:
             span_name="orchestrator.start_workflow",
             attributes={"workflow.id": workflow_id},
         ):
+            workflow_start = time.time()
             workflow_definition = self.definition_repository.load(workflow_id)
             validate_workflow_graph(workflow_definition.to_validation_payload())
 
@@ -198,11 +209,19 @@ class WorkflowOrchestrator:
                 updated_at=started_at,
             )
             execution = self.execution_repository.create(pending_execution)
+            
+            # Record workflow execution started
+            WORKFLOW_EXECUTIONS_TOTAL.labels(workflow_id=workflow_definition.workflow_id, status='started').inc()
+            ACTIVE_WORKFLOWS.labels(state='pending').inc()
 
+            lease_start = time.time()
             lease_key = f"workflow-execution:{execution.execution_id}"
             lease = self.lease_manager.acquire(lease_key, self.config.orchestrator_agent_id, self.config.lease_ttl_seconds)
             if lease is None:
+                LEASE_ACQUISITIONS_TOTAL.labels(status='failed').inc()
                 raise LeaseUnavailableError(f"unable to acquire lease for {lease_key}")
+            LEASE_ACQUISITIONS_TOTAL.labels(status='acquired').inc()
+            LEASE_DURATION.observe(time.time() - lease_start)
 
             running_execution = self.execution_repository.transition_pending_to_running(
                 execution_id=execution.execution_id,
@@ -211,6 +230,11 @@ class WorkflowOrchestrator:
                 heartbeat_at=self.clock.now(),
                 expected_version=execution.version,
             )
+            
+            # Update workflow state metrics
+            WORKFLOW_STATE_TRANSITIONS.labels(from_state='pending', to_state='running').inc()
+            ACTIVE_WORKFLOWS.labels(state='pending').dec()
+            ACTIVE_WORKFLOWS.labels(state='running').inc()
 
             entry_node = self._require_entry_node(workflow_definition)
             message = TaskAssignmentMessage(
@@ -233,7 +257,12 @@ class WorkflowOrchestrator:
                     "lease_expires_at": lease.expires_at.isoformat(),
                 },
             )
+            
+            publish_start = time.time()
             self.publisher.publish(self.config.task_assignment_subject, message.to_dict(), headers=inject_trace_headers())
+            MESSAGE_PUBLISH_LATENCY.observe(time.time() - publish_start)
+            
+            WORKFLOW_EXECUTION_DURATION.labels(workflow_id=workflow_definition.workflow_id).observe(time.time() - workflow_start)
             return running_execution
 
     @staticmethod

@@ -2,7 +2,7 @@
 Prometheus metrics for Agent Worker service.
 """
 
-from prometheus_client import Counter, Histogram, Gauge
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # Message processing
 MESSAGES_PROCESSED_TOTAL = Counter(
@@ -57,3 +57,8 @@ ERRORS_TOTAL = Counter(
     'Errors encountered',
     ['error_type']
 )
+
+
+def init_metrics(agent_role: str = "researcher", port: int = 9092):
+    """Start Prometheus metrics HTTP server."""
+    start_http_server(port)
